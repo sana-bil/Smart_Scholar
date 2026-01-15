@@ -1,286 +1,86 @@
 import pyodbc
 import pandas as pd
-from typing import Dict, List, Tuple
+from typing import Dict
+from sentence_transformers import SentenceTransformer, util
+import torch
+import re
 
 class MatchingAlgorithm:
-    """Calculate match scores between student profile and program requirements"""
-    
     def __init__(self):
-        # SQL Server connection
         self.conn = pyodbc.connect(
             'Driver={ODBC Driver 17 for SQL Server};'
             'Server=DESKTOP-2G14Q4N\\MSSQLSERVER01;'
             'Database=SmartScholar;'
             'Trusted_Connection=yes;'
         )
-    
-    def get_all_programs(self) -> pd.DataFrame:
-        """Fetch all programs with their requirements"""
-        query = """
-        SELECT 
-            ep.program_id,
-            ep.program_name,
-            ep.acronym,
-            ep.field,
-            ep.consortium,
-            ep.website,
-            ep.scholarship,
-            ep.application_deadline,
-            pr.min_toefl_score,
-            pr.min_ielts_score,
-            pr.min_cambridge_score,
-            pr.min_cgpa,
-            pr.cgpa_scale,
-            pr.english_required,
-            pr.work_experience_years,
-            pr.accepted_degree_fields
-        FROM EmjmdPrograms ep
-        LEFT JOIN ProgramRequirements pr ON ep.program_id = pr.program_id
-        ORDER BY ep.program_id
-        """
-        return pd.read_sql(query, self.conn)
-    
-    def get_programs_by_field(self, field: str) -> pd.DataFrame:
-        """Fetch programs filtered by field"""
-        query = f"""
-        SELECT 
-            ep.program_id,
-            ep.program_name,
-            ep.acronym,
-            ep.field,
-            ep.consortium,
-            ep.website,
-            ep.scholarship,
-            ep.application_deadline,
-            pr.min_toefl_score,
-            pr.min_ielts_score,
-            pr.min_cambridge_score,
-            pr.min_cgpa,
-            pr.cgpa_scale,
-            pr.english_required,
-            pr.work_experience_years,
-            pr.accepted_degree_fields
-        FROM EmjmdPrograms ep
-        LEFT JOIN ProgramRequirements pr ON ep.program_id = pr.program_id
-        WHERE ep.field LIKE '%{field}%'
-        ORDER BY ep.program_id
-        """
-        return pd.read_sql(query, self.conn)
-    
-    def get_unique_fields(self) -> List[str]:
-        """Get all unique program fields"""
-        query = "SELECT DISTINCT field FROM EmjmdPrograms WHERE field IS NOT NULL ORDER BY field"
-        result = pd.read_sql(query, self.conn)
-        return result['field'].tolist() if not result.empty else []
-    
-    def normalize_cgpa(self, student_cgpa: float, student_scale: float, requirement_scale: float) -> float:
-        """Normalize CGPA to requirement scale"""
-        if student_scale == requirement_scale:
-            return student_cgpa
-        return (student_cgpa / student_scale) * requirement_scale
-    
-    def calculate_cgpa_match(self, student_cgpa: float, student_scale: float, req_cgpa: float, req_scale: float) -> Tuple[int, str]:
-        """Calculate CGPA match score (0-25 points) - REDUCED PRIORITY"""
-        if req_cgpa is None or pd.isna(req_cgpa):
-            return 25, "No CGPA requirement"
-        
-        # Normalize student CGPA to requirement scale
-        normalized_cgpa = self.normalize_cgpa(student_cgpa, student_scale, req_scale)
-        
-        if normalized_cgpa >= req_cgpa:
-            return 25, f"Your CGPA {student_cgpa}/{student_scale} meets requirement {req_cgpa}/{req_scale}"
-        else:
-            gap = req_cgpa - normalized_cgpa
-            # Partial credit for being close
-            score = max(0, int(25 - (gap * 10)))
-            return score, f"Your CGPA {student_cgpa}/{student_scale} is below requirement {req_cgpa}/{req_scale} (gap: {gap:.2f})"
-    
-    def calculate_language_match(self, toefl: int = None, ielts: float = None, cambridge: str = None, 
-                                 req_toefl: int = None, req_ielts: float = None, req_cambridge: str = None) -> Tuple[int, str]:
-        """Calculate language match score (0-15 points) - REDUCED PRIORITY"""
-        if req_toefl is None and req_ielts is None and req_cambridge is None:
-            return 15, "No specific language requirement"
-        
-        matches = 0
-        feedback = []
-        total_requirements = 0
-        
-        # TOEFL check
-        if req_toefl is not None and not pd.isna(req_toefl):
-            total_requirements += 1
-            if toefl and toefl >= req_toefl:
-                matches += 1
-                feedback.append(f"✓ TOEFL {toefl} meets requirement {req_toefl}")
-            elif toefl:
-                feedback.append(f"✗ TOEFL {toefl} below requirement {req_toefl}")
-            else:
-                feedback.append(f"✗ No TOEFL score provided (requirement: {req_toefl})")
-        
-        # IELTS check
-        if req_ielts is not None and not pd.isna(req_ielts):
-            total_requirements += 1
-            if ielts and ielts >= req_ielts:
-                matches += 1
-                feedback.append(f"✓ IELTS {ielts} meets requirement {req_ielts}")
-            elif ielts:
-                feedback.append(f"✗ IELTS {ielts} below requirement {req_ielts}")
-            else:
-                feedback.append(f"✗ No IELTS score provided (requirement: {req_ielts})")
-        
-        # Cambridge check
-        if req_cambridge is not None and not pd.isna(req_cambridge):
-            total_requirements += 1
-            if cambridge and cambridge >= req_cambridge:
-                matches += 1
-                feedback.append(f"✓ Cambridge {cambridge} meets requirement {req_cambridge}")
-            elif cambridge:
-                feedback.append(f"✗ Cambridge {cambridge} below requirement {req_cambridge}")
-            else:
-                feedback.append(f"✗ No Cambridge score provided (requirement: {req_cambridge})")
-        
-        if matches > 0 and total_requirements > 0:
-            score = int(15 * (matches / total_requirements))
-            return score, " | ".join(feedback)
-        else:
-            return 0, " | ".join(feedback) if feedback else "No language test scores provided"
-    
-    def calculate_field_match(self, student_field: str, accepted_fields: str, program_field: str = None) -> Tuple[int, str]:
-        """Calculate field match score (0-50 points) - NOW PRIMARY CRITERION
-        Checks both: program's own field AND accepted degree fields"""
-        
-        student_field_lower = student_field.lower()
-        
-        # First priority: Check program's own field
-        if program_field:
-            program_field_lower = str(program_field).lower()
-            
-            # Perfect match with program field
-            if student_field_lower in program_field_lower or program_field_lower in student_field_lower:
-                return 50, f"Your field ({student_field}) matches program focus ({program_field})"
-            
-            # Partial match with program field
-            keywords = student_field_lower.split()
-            for keyword in keywords:
-                if len(keyword) > 3 and keyword in program_field_lower:
-                    return 45, f"Your field ({student_field}) is related to program focus ({program_field})"
-        
-        # Second priority: Check accepted degree fields
-        if accepted_fields and not pd.isna(accepted_fields):
-            accepted_list = [f.strip().lower() for f in str(accepted_fields).split(',')]
-            
-            # Perfect match in accepted fields
-            if student_field_lower in accepted_list:
-                return 40, f"Your field ({student_field}) is listed in accepted fields"
-            
-            # Partial match in accepted fields
-            for field in accepted_list:
-                if field in student_field_lower or student_field_lower in field:
-                    return 30, f"Your field ({student_field}) is related to accepted fields"
-        
-        # No match found
-        return 5, f"Your field ({student_field}) does not match program focus"
-    
-    def calculate_work_experience_match(self, student_years: int, required_years: int = None) -> Tuple[int, str]:
-        """Calculate work experience match score (0-5 points) - REDUCED"""
-        if required_years is None or pd.isna(required_years) or required_years == 0:
-            return 5, "Work experience not required"
-        
-        if student_years >= required_years:
-            return 5, f"Your {student_years} years meets requirement of {required_years} years"
-        else:
-            return 0, f"Your {student_years} years is below requirement of {required_years} years"
-    
+        self.nlp_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+        self.main_domains = [
+            "Engineering & Technology", "Law & Governance", "Mathematics & Statistics",
+            "Psychology & Cognitive Science", "Biology & Life Sciences", "Physics & Physical Sciences",
+            "Business & Economics", "Humanities & Social Sciences", "Medicine & Health", "Environmental Science"
+        ]
+
+    def _clean_text(self, text: str) -> str:
+        """Removes filler academic words so AI focuses on the core subject."""
+        if not text: return ""
+        pattern = r'\b(bachelors?|masters?|degree|bsc|ba|bba|engg|in)\b'
+        cleaned = re.sub(pattern, '', text, flags=re.IGNORECASE)
+        return cleaned.strip()
+
+    def infer_domain(self, text: str) -> str:
+        try:
+            text = self._clean_text(text)
+            if not text: return "Engineering & Technology"
+            low_text = text.lower()
+            if any(k in low_text for k in ['ai', 'machine learning', 'data science', 'analytics', 'software', 'computer']):
+                return "Engineering & Technology"
+            if any(k in low_text for k in ['art', 'design', 'creative', 'culture', 'humanities']):
+                return "Humanities & Social Sciences"
+
+            text_emb = self.nlp_model.encode(text, convert_to_tensor=True)
+            domain_embs = self.nlp_model.encode(self.main_domains, convert_to_tensor=True)
+            sims = util.pytorch_cos_sim(text_emb, domain_embs)[0]
+            return self.main_domains[sims.argmax().item()]
+        except:
+            return "Engineering & Technology"
+
     def calculate_total_match(self, student_profile: Dict, program: pd.Series) -> Dict:
-        """Calculate overall match score for a program
+        s_clean_field = self._clean_text(student_profile.get('field', ''))
+        p_raw_text = program['field'] if program['field'] else program['program_name']
+        p_clean_text = self._clean_text(p_raw_text)
+
+        if self.infer_domain(s_clean_field) != self.infer_domain(p_clean_text):
+            return self._create_result(program, 0, "🔴", "Domain Mismatch")
+
+        student_emb = self.nlp_model.encode(s_clean_field, convert_to_tensor=True)
+        program_emb = self.nlp_model.encode(p_clean_text, convert_to_tensor=True)
+        similarity = float(util.pytorch_cos_sim(student_emb, program_emb)[0][0])
         
-        NEW SCORING (out of 100):
-        - Field: 50 points (PRIMARY - most important)
-        - CGPA: 25 points
-        - Language: 15 points
-        - Work Experience: 5 points
-        - Citizenship: 5 points
-        = 100 points MAX
-        """
+        if similarity < 0.28: 
+            return self._create_result(program, 0, "🔴", "Unrelated Field")
+
+        f_score = 50 if similarity >= 0.45 else 42 if similarity >= 0.35 else 30
+        req_cgpa = program['min_cgpa'] if not pd.isna(program['min_cgpa']) else 0
+        norm_student = (student_profile['cgpa'] / student_profile['cgpa_scale']) * (program['cgpa_scale'] if not pd.isna(program['cgpa_scale']) else 4.0)
+        c_score = 25 if norm_student >= req_cgpa else max(5, int(25 - ((req_cgpa - norm_student) * 10)))
         
-        # Extract scores
-        cgpa_score, cgpa_feedback = self.calculate_cgpa_match(
-            student_profile['cgpa'],
-            student_profile['cgpa_scale'],
-            program['min_cgpa'],
-            program['cgpa_scale'] if program['cgpa_scale'] else 4.0
-        )
-        
-        language_score, language_feedback = self.calculate_language_match(
-            student_profile.get('toefl'),
-            student_profile.get('ielts'),
-            student_profile.get('cambridge'),
-            program['min_toefl_score'],
-            program['min_ielts_score'],
-            program['min_cambridge_score']
-        )
-        
-        field_score, field_feedback = self.calculate_field_match(
-            student_profile['field'],
-            program['accepted_degree_fields'],
-            program['field']  # Pass program's own field
-        )
-        
-        work_exp_score, work_exp_feedback = self.calculate_work_experience_match(
-            student_profile['work_experience'],
-            program['work_experience_years']
-        )
-        
-        # Total: 50 + 25 + 15 + 5 + 5 (citizenship) = 100
-        total_score = cgpa_score + language_score + field_score + work_exp_score + 5
-        
-        # CAP AT 100 (fix for >100% issue)
-        total_score = min(100, total_score)
-        
+        l_score = 0
+        if student_profile.get('ielts') and not pd.isna(program['min_ielts_score']):
+            if student_profile['ielts'] >= program['min_ielts_score']: l_score = 15
+        elif student_profile.get('toefl') and not pd.isna(program['min_toefl_score']):
+            if student_profile['toefl'] >= program['min_toefl_score']: l_score = 15
+
+        e_score = 5 if student_profile['work_experience'] >= 1 else 0
+        total = min(100, int(f_score + c_score + l_score + e_score + 5))
+        return self._create_result(program, total, "🟢" if total >= 80 else "🟡" if total >= 60 else "🔴", "Match Found", f_score, c_score, l_score, e_score)
+
+    def _create_result(self, program, match_val, status, reason, f=0, c=0, l=0, e=0):
         return {
-            'program_id': program['program_id'],
-            'program_name': program['program_name'],
-            'acronym': program['acronym'],
-            'field': program['field'],
-            'website': program['website'],
-            'consortium': program['consortium'],
-            'scholarship': program['scholarship'],
-            'deadline': program['application_deadline'],
-            'overall_match': int(total_score),
-            'cgpa_score': int(cgpa_score),
-            'cgpa_feedback': cgpa_feedback,
-            'language_score': int(language_score),
-            'language_feedback': language_feedback,
-            'field_score': int(field_score),
-            'field_feedback': field_feedback,
-            'work_exp_score': int(work_exp_score),
-            'work_exp_feedback': work_exp_feedback
+            'status': status, 'program_name': program['program_name'], 'acronym': program['acronym'],
+            'field': program['field'], 'overall_match': match_val, 'field_score': f, 'cgpa_score': c,
+            'lang_score': l, 'exp_score': e, 'consortium': program['consortium'],
+            'deadline': program['application_deadline'], 'scholarship': program['scholarship'], 'reason': reason
         }
-    
-    def match_programs(self, student_profile: Dict, programs_df: pd.DataFrame) -> List[Dict]:
-        """Match student against all programs"""
-        results = []
-        
-        for idx, program in programs_df.iterrows():
-            match_result = self.calculate_total_match(student_profile, program)
-            results.append(match_result)
-        
-        # Sort by match score descending
-        results.sort(key=lambda x: x['overall_match'], reverse=True)
-        return results
-    
-    def get_top_recommendations(self, match_results: List[Dict], top_n: int = 3) -> List[Dict]:
-        """Get top N program recommendations"""
-        return match_results[:top_n]
-    
-    def get_match_color(self, score: int) -> str:
-        """Get color coding for match score"""
-        if score >= 80:
-            return "green"
-        elif score >= 60:
-            return "orange"
-        else:
-            return "red"
-    
-    def close(self):
-        """Close database connection"""
-        self.conn.close()
+
+    def get_all_programs(self):
+        return pd.read_sql("SELECT ep.*, pr.* FROM EmjmdPrograms ep LEFT JOIN ProgramRequirements pr ON ep.program_id = pr.program_id", self.conn)

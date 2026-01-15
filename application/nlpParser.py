@@ -1,198 +1,254 @@
-import re
+import spacy
 import pandas as pd
 import pyodbc
+import re
 from datetime import datetime
 
-# SQL Server Connection with Windows Authentication
+# Load spaCy model
+print("Loading spaCy NLP model...")
+nlp = spacy.load("en_core_web_sm")
+print("✓ spaCy model loaded!")
+
+# SQL Server Connection
 conn = pyodbc.connect(
     'Driver={ODBC Driver 17 for SQL Server};'
     'Server=DESKTOP-2G14Q4N\\MSSQLSERVER01;'
     'Database=SmartScholar;'
     'Trusted_Connection=yes;'
 )
-
 cursor = conn.cursor()
 
 
-# NLP PARSER - Extract Requirements from Text
+# ==================== SPACY-BASED PARSERS ====================
 
-
-def parse_toefl(text):
-    """Extract minimum TOEFL score"""
-    if not text:
-        return None
+def parse_toefl_spacy(doc, text):
+    """Extract TOEFL using spaCy + regex fallback"""
+    # spaCy finds NUMBERS
+    numbers = [ent.text for ent in doc.ents if ent.label_ == "CARDINAL"]
     
-    # Patterns: "TOEFL iBT ≥ 90", "TOEFL 90", "TOEFL iBT minimum 90"
-    patterns = [
-        r'TOEFL\s+iBT\s*(?:≥|>=|minimum\s+|score\s+)?(\d{2,3})',
-        r'TOEFL\s*(?:iBT)?\s*(?:≥|>=)?(\d{2,3})',
-    ]
-    
-    for pattern in patterns:
+    # Look for TOEFL context
+    if "TOEFL" in text or "TOEFL iBT" in text:
+        # Find numbers near "TOEFL"
+        pattern = r'TOEFL\s+(?:iBT)?\s*(?:≥|>=|minimum\s+)?(\d{2,3})'
         match = re.search(pattern, text, re.IGNORECASE)
+        
         if match:
             score = int(match.group(1))
-            if 50 <= score <= 120:  # Valid TOEFL range
-                return score
-    return None
+            if 50 <= score <= 120:
+                return score, 0.95  # High confidence
+    
+    return None, 0.0
 
-def parse_ielts(text):
-    """Extract minimum IELTS score"""
-    if not text:
-        return None
+def parse_ielts_spacy(doc, text):
+    """Extract IELTS using spaCy + regex"""
+    # spaCy finds CARDINAL numbers (decimals)
     
-    # Patterns: "IELTS ≥ 6.5", "IELTS 6.5", "IELTS Academic ≥ 6.5"
-    patterns = [
-        r'IELTS\s+(?:Academic)?\s*(?:≥|>=)?(\d\.\d)',
-        r'IELTS\s*(?:≥|>=)?(\d\.\d)',
-    ]
-    
-    for pattern in patterns:
+    if "IELTS" in text or "IELTS Academic" in text:
+        pattern = r'IELTS\s+(?:Academic)?\s*(?:≥|>=)?(\d\.\d)'
         match = re.search(pattern, text, re.IGNORECASE)
+        
         if match:
             score = float(match.group(1))
-            if 0.0 <= score <= 9.0:  # Valid IELTS range
-                return score
-    return None
+            if 0.0 <= score <= 9.0:
+                return score, 0.95  # High confidence
+    
+    return None, 0.0
 
-def parse_cambridge(text):
-    """Extract Cambridge certificate level"""
-    if not text:
-        return None
+def parse_cambridge_spacy(doc, text):
+    """Extract Cambridge certificate using spaCy"""
+    # Look for C1, C2 levels
+    pattern = r'(?:Cambridge|C[12])\s*(?:Advanced|Proficiency|[C][12])?'
     
-    # Patterns: "Cambridge C1", "Cambridge C2", "C1 Advanced", "C2 Proficiency"
-    patterns = [
-        r'Cambridge\s+(C[12])',
-        r'(C[12])\s+(?:Advanced|Proficiency)',
-        r'(C[12])\s+Advanced',
-    ]
+    if "Cambridge" in text or re.search(r'\bC[12]\b', text):
+        c_match = re.search(r'\b(C[12])\b', text)
+        if c_match:
+            return c_match.group(1), 0.95
     
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    return None
+    return None, 0.0
 
-def parse_cgpa(text):
-    """Extract minimum CGPA/GPA requirement"""
-    if not text:
-        return None
+def parse_cgpa_spacy(doc, text):
+    """Extract CGPA using spaCy NER for numbers"""
+    cgpa = None
+    confidence = 0.0
     
-    # Patterns: "GPA 3.0", "CGPA 3.5/4.0", "minimum GPA 3.0", "≥ 3.0"
-    patterns = [
-        r'(?:GPA|CGPA)\s*(?:of\s+)?(?:≥|>=|minimum\s+)?(\d\.\d+)',
-        r'(?:≥|>=)\s*(\d\.\d+)',
-    ]
+    # Look for GPA/CGPA mentions
+    if "GPA" in text or "CGPA" in text or "grade point" in text.lower():
+        # spaCy recognizes CARDINAL and finds numbers
+        for ent in doc.ents:
+            if ent.label_ == "CARDINAL":
+                try:
+                    val = float(ent.text)
+                    if 0.0 <= val <= 5.0 and (cgpa is None or val > cgpa):
+                        cgpa = val
+                        confidence = 0.90
+                except:
+                    pass
+        
+        # Fallback regex
+        if cgpa is None:
+            pattern = r'(?:GPA|CGPA|grade point average)\s*(?:of\s+)?(?:≥|>=|minimum\s+)?(\d\.\d+)'
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                cgpa = float(match.group(1))
+                confidence = 0.85
     
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            score = float(match.group(1))
-            if 0.0 <= score <= 5.0:  # Valid GPA range
-                return score
-    return None
+    return cgpa, confidence
 
-def parse_cgpa_scale(text):
-    """Determine CGPA scale (4.0, 5.0, 10.0)"""
-    if not text:
-        return 4.0
-    
-    # Patterns: "3.0/4.0", "out of 5.0", "on a scale of 10"
-    if '/5' in text or 'out of 5' in text.lower():
+def parse_cgpa_scale_spacy(doc, text):
+    """Determine CGPA scale using spaCy"""
+    # Look for scale indicators
+    if "/5" in text or "out of 5" in text.lower() or "scale of 5" in text.lower():
         return 5.0
-    elif '/10' in text or 'scale of 10' in text.lower():
+    elif "/10" in text or "out of 10" in text.lower() or "scale of 10" in text.lower():
         return 10.0
     
     return 4.0
 
-def parse_english_required(text):
-    """Check if English is required"""
-    if not text:
-        return 0
+def parse_work_experience_spacy(doc, text):
+    """Extract work experience using spaCy NER"""
+    years = None
+    confidence = 0.0
     
-    english_required_keywords = ['English', 'TOEFL', 'IELTS', 'Cambridge', 'proficiency', 'certificate']
+    # Look for year/experience context
+    if "year" in text.lower() and "experience" in text.lower():
+        # spaCy finds CARDINAL numbers
+        for ent in doc.ents:
+            if ent.label_ == "CARDINAL":
+                try:
+                    val = int(float(ent.text))
+                    if 0 <= val <= 50 and val > 0:
+                        years = val
+                        confidence = 0.90
+                except:
+                    pass
+        
+        # Fallback regex
+        if years is None:
+            pattern = r'(?:minimum\s+)?(\d+)\+?\s+years?\s+(?:of\s+)?(?:work\s+)?experience'
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                years = int(match.group(1))
+                confidence = 0.85
     
-    for keyword in english_required_keywords:
-        if keyword.lower() in text.lower():
-            return 1
-    return 0
+    return years, confidence
 
-def parse_work_experience(text):
-    """Extract work experience requirement (in years)"""
-    if not text:
-        return None
+def parse_accepted_fields_spacy(doc, text):
+    """Extract accepted degree fields using spaCy NER"""
+    fields = set()
     
-    # Patterns: "2+ years", "2 years", "minimum 3 years"
-    patterns = [
-        r'(?:minimum\s+)?(\d+)\+?\s+years?\s+(?:of\s+)?(?:work\s+)?experience',
-        r'(\d+)\s+years?\s+(?:experience|professional)',
-    ]
+    # Field keywords
+    field_keywords = {
+        'Computer Science': ['computer science', 'cs', 'computing', 'software'],
+        'Engineering': ['engineering', 'mechanical', 'electrical', 'civil', 'chemical'],
+        'Mathematics': ['mathematics', 'math', 'mathematical', 'maths'],
+        'Physics': ['physics', 'physical'],
+        'Chemistry': ['chemistry', 'chemical'],
+        'Biology': ['biology', 'biological', 'life science'],
+        'Medicine': ['medicine', 'medical', 'health'],
+        'Business': ['business', 'commerce', 'management'],
+        'Economics': ['economics', 'economic'],
+        'Law': ['law', 'legal'],
+        'Psychology': ['psychology'],
+        'Statistics': ['statistics', 'statistical'],
+        'Data Science': ['data science', 'data analytics'],
+        'IT': ['it', 'information technology'],
+        'Architecture': ['architecture'],
+        'Environmental Science': ['environmental', 'sustainability'],
+        'Humanities': ['humanities', 'language', 'literature', 'history'],
+    }
     
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            years = int(match.group(1))
-            if 0 <= years <= 50:  # Valid range
-                return years
-    return None
-
-def parse_accepted_fields(text):
-    """Extract accepted degree fields"""
-    if not text:
-        return None
+    text_lower = text.lower()
     
-    # Look for field mentions
-    fields = []
-    field_keywords = [
-        'Computer Science', 'Engineering', 'Mathematics', 'Physics', 'Chemistry',
-        'Biology', 'Medicine', 'Pharmacy', 'Business', 'Economics', 'Law',
-        'Psychology', 'Sociology', 'History', 'Languages', 'Architecture',
-        'Environmental Science', 'Agriculture', 'Geology', 'Astronomy',
-        'Statistics', 'Data Science', 'IT', 'Informatics'
-    ]
+    # Use spaCy NER to find domain-specific entities
+    for ent in doc.ents:
+        ent_text = ent.text.lower()
+        
+        # Check if entity matches any field keywords
+        for field, keywords in field_keywords.items():
+            for keyword in keywords:
+                if keyword in ent_text or keyword in text_lower:
+                    fields.add(field)
     
-    for field in field_keywords:
-        if field.lower() in text.lower():
-            fields.append(field)
+    # Fallback: keyword matching if NER didn't catch
+    if not fields:
+        for field, keywords in field_keywords.items():
+            for keyword in keywords:
+                if keyword in text_lower:
+                    fields.add(field)
     
     if fields:
-        return ', '.join(list(set(fields)))  # Remove duplicates
+        return ', '.join(sorted(list(fields)))
     return None
 
-def parse_requirement_row(program_id, requirement_text):
-    """Parse a single requirement row"""
+def parse_english_required_spacy(doc, text):
+    """Check if English is required using spaCy"""
+    english_keywords = ['English', 'TOEFL', 'IELTS', 'Cambridge', 'proficiency', 'language test']
+    
+    for keyword in english_keywords:
+        if keyword.lower() in text.lower():
+            return 1
+    
+    return 0
+
+def parse_requirement_row_spacy(program_id, requirement_text, program_name=""):
+    """Parse requirement using spaCy NLP"""
+    
+    if not requirement_text:
+        return None
+    
     try:
+        # Process text with spaCy
+        doc = nlp(requirement_text)
+        
+        # Extract all components
+        min_toefl, toefl_conf = parse_toefl_spacy(doc, requirement_text)
+        min_ielts, ielts_conf = parse_ielts_spacy(doc, requirement_text)
+        min_cambridge, cambridge_conf = parse_cambridge_spacy(doc, requirement_text)
+        min_cgpa, cgpa_conf = parse_cgpa_spacy(doc, requirement_text)
+        cgpa_scale = parse_cgpa_scale_spacy(doc, requirement_text)
+        work_exp, work_exp_conf = parse_work_experience_spacy(doc, requirement_text)
+        english_req = parse_english_required_spacy(doc, requirement_text)
+        accepted_fields = parse_accepted_fields_spacy(doc, requirement_text)
+        
+        # Average confidence across all extractions
+        confidences = [c for c in [toefl_conf, ielts_conf, cgpa_conf, work_exp_conf] if c > 0]
+        avg_confidence = sum(confidences) / len(confidences) if confidences else 0.70
+        
         return {
             'program_id': program_id,
-            'min_toefl_score': parse_toefl(requirement_text),
-            'min_ielts_score': parse_ielts(requirement_text),
-            'min_cambridge_score': parse_cambridge(requirement_text),
-            'min_cgpa': parse_cgpa(requirement_text),
-            'cgpa_scale': parse_cgpa_scale(requirement_text),
-            'english_required': parse_english_required(requirement_text),
-            'work_experience_years': parse_work_experience(requirement_text),
-            'accepted_degree_fields': parse_accepted_fields(requirement_text),
+            'min_toefl_score': min_toefl,
+            'min_ielts_score': min_ielts,
+            'min_cambridge_score': min_cambridge,
+            'min_cgpa': min_cgpa,
+            'cgpa_scale': cgpa_scale,
+            'english_required': english_req,
+            'work_experience_years': work_exp,
+            'accepted_degree_fields': accepted_fields,
             'requirement_text_raw': requirement_text,
-            'parsing_confidence': 0.85  # Default confidence
+            'parsing_confidence': round(avg_confidence, 2)
         }
+    
     except Exception as e:
-        print(f"Error parsing row {program_id}: {str(e)}")
+        print(f"❌ Error parsing program {program_id}: {str(e)}")
         return None
 
- 
-# READ DATA FROM SQL SERVER
 
+# ==================== MAIN EXECUTION ====================
 
 try:
-    print("📖 Reading programs from SmartScholar database...")
+    print("\n📖 Reading programs from SmartScholar database...")
     
-    # Read all programs
-    query = "SELECT program_id, program_name, requirement_text_raw FROM EmjmdPrograms"
+    # Read all programs WITH requirement text
+    query = """
+    SELECT program_id, program_name, requirement_text_raw 
+    FROM EmjmdPrograms 
+    WHERE requirement_text_raw IS NOT NULL
+    """
     programs_df = pd.read_sql(query, conn)
     
-    print(f"✓ Found {len(programs_df)} programs")
+    print(f"✓ Found {len(programs_df)} programs with requirement text")
     
-    # Parse each program
+    # Parse each program using spaCy
     parsed_requirements = []
     
     for idx, row in programs_df.iterrows():
@@ -200,7 +256,7 @@ try:
         requirement_text = row['requirement_text_raw']
         program_name = row['program_name']
         
-        parsed = parse_requirement_row(program_id, requirement_text)
+        parsed = parse_requirement_row_spacy(program_id, requirement_text, program_name)
         
         if parsed:
             parsed_requirements.append(parsed)
@@ -209,20 +265,23 @@ try:
             toefl = parsed['min_toefl_score'] or 'N/A'
             ielts = parsed['min_ielts_score'] or 'N/A'
             cgpa = parsed['min_cgpa'] or 'N/A'
+            conf = parsed['parsing_confidence']
             
-            print(f"✓ Program {program_id}: TOEFL={toefl}, IELTS={ielts}, CGPA={cgpa}")
+            print(f"✓ Program {program_id}: TOEFL={toefl}, IELTS={ielts}, CGPA={cgpa}, Confidence={conf:.2f}")
     
-    print(f"\n✅ Successfully parsed {len(parsed_requirements)} programs!")
-
-    # CREATE ProgramRequirements TABLE
-
+    print(f"\n✅ Successfully parsed {len(parsed_requirements)} programs using spaCy NLP!")
     
-    print("\n🔨 Creating ProgramRequirements table...")
+    # ==================== RECREATE TABLE ====================
+    
+    print("\n🔨 Dropping old ProgramRequirements table...")
+    
+    drop_sql = "IF OBJECT_ID('dbo.ProgramRequirements', 'U') IS NOT NULL DROP TABLE dbo.ProgramRequirements;"
+    cursor.execute(drop_sql)
+    conn.commit()
+    
+    print("🔨 Creating new ProgramRequirements table...")
     
     create_table_sql = """
-    IF OBJECT_ID('dbo.ProgramRequirements', 'U') IS NOT NULL 
-        DROP TABLE dbo.ProgramRequirements;
-    
     CREATE TABLE ProgramRequirements (
         requirement_id INT PRIMARY KEY IDENTITY(1,1),
         program_id INT NOT NULL,
@@ -245,11 +304,9 @@ try:
     conn.commit()
     print("✓ Table created successfully!")
     
-
-    # INSERT PARSED DATA
-
+    # ==================== INSERT PARSED DATA ====================
     
-    print("\n📤 Inserting parsed requirements into database...")
+    print("\n📤 Inserting spaCy-parsed requirements into database...")
     
     insert_sql = """
     INSERT INTO ProgramRequirements 
@@ -275,16 +332,21 @@ try:
         ))
     
     conn.commit()
-    print(f"✅ Successfully inserted {len(parsed_requirements)} parsed requirements!")
+    print(f"✅ Successfully inserted {len(parsed_requirements)} spaCy-parsed requirements!")
     
-  
-    # VERIFICATION
- 
+    # ==================== VERIFICATION ====================
     
-    print("\n🔍 Verification - Sample parsed data:")
-    verify_sql = "SELECT TOP 5 program_id, min_toefl_score, min_ielts_score, min_cgpa FROM ProgramRequirements"
+    print("\n🔍 Verification - Sample parsed data (Top 10):")
+    verify_sql = """
+    SELECT TOP 10 program_id, min_toefl_score, min_ielts_score, min_cgpa, 
+                  accepted_degree_fields, parsing_confidence 
+    FROM ProgramRequirements 
+    ORDER BY program_id
+    """
     verify_df = pd.read_sql(verify_sql, conn)
     print(verify_df.to_string())
+    
+    print("\n✓ spaCy NLP parsing complete!")
     
 except Exception as e:
     print(f"❌ Error: {str(e)}")
