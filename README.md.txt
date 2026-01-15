@@ -1,43 +1,32 @@
-# ScholarAI - Erasmus Mundus Program Matcher
+# 🎓 ScholarAI: AI-Powered Erasmus Mundus Matcher
 
-An intelligent NLP-powered system that matches students with Erasmus Mundus Master's programs.
+Smart Scholar is a full-stack AI application designed to bridge the gap between students and the complex requirements of Erasmus Mundus Joint Masters (EMJM). 
+It uses Natural Language Processing (NLP) to extract program criteria and Semantic Similarity to match student backgrounds with 89 academic programs.
 
-## Features
+## 🚀 The AI Pipeline (How it's Built)
 
-✨ **Smart Matching**: Field-first matching algorithm
-🎯 **89 Programs**: All official Erasmus Mundus Master's programs
-📊 **Intelligent Scoring**: Color-coded match percentages (Green >80%, Yellow 60-80%, Red <60%)
-🏆 **Top Recommendations**: Personalized program suggestions
-📄 **PDF Reports**: Downloadable match reports with detailed analysis
+1. **Data Extraction (ETL):** Aggregated raw data using Perplexity/Claude, cleaned via Python, and stored in a Relational SQL Server database.
+2. **NLP Requirements Parsing:** Used **spaCy (NER)** and custom Regex heuristics to transform unstructured requirement text into structured data (CGPA, IELTS, TOEFL, Exp).
+3. **Semantic Matching Engine:** Powered by **Sentence-Transformers (`all-MiniLM-L6-v2`)**. It calculates the Cosine Similarity between a student's degree and program fields, moving beyond simple keyword matching.
+4. **Professional Reporting:** Custom FPDF engine that generates a single-page Executive Compatibility Report.
 
-## Tech Stack
+## ✨ Key Features
 
-- **Frontend**: Streamlit
-- **Backend Logic**: Python with NLP
-- **Database**: SQL Server
-- **NLP**: spaCy, NLTK, Regex-based extraction
+- 🧠 **Vector-Based Matching**: Understands that "Software Engineering" is similar to "Computer Science" using AI embeddings.
+- 🔍 **Domain Guardrails**: Prevents mismatches between unrelated fields (e.g., Arts vs. Physics) using an inference layer.
+- 📈 **Dynamic Scoring**: A 100-point weighted algorithm (Field: 50%, CGPA: 25%, Language: 15%, Experience: 10%).
+- 📄 **Executive PDF Export**: Generates professional, one-page compatibility dossiers for applicants.
 
-## Quick Start
-```bash
-# Install dependencies
-pip install -r requirements.txt
+## 🛠 Tech Stack
 
-# Run the app
-streamlit run src/streamlit_app.py
-```
+- **Frontend**: Streamlit (Dashboard & Metrics)
+- **NLP/AI**: spaCy (Entity Recognition), Sentence-Transformers (Embeddings)
+- **Database**: Microsoft SQL Server (T-SQL)
+- **Backend**: Python (pandas, pyodbc, torch)
 
-## How It Works
+## 📂 Project Structure
 
-1. Enter your academic profile (CGPA, field, English scores, experience)
-2. Select or filter programs by field
-3. Get intelligent match scores based on:
-   - Field alignment (50%)
-   - CGPA requirements (25%)
-   - Language proficiency (15%)
-   - Work experience (5%)
-   - Citizenship (5%)
-4. View top recommendations with detailed feedback
-5. Download PDF report with all matches
+
 
 Smart Scholar/
 │
